@@ -155,7 +155,7 @@ int calculateFATsize(uint16_t data_cluster, int cluster_size, uint8_t *image_buf
 
 	int size_FAT = 0;
 
-	while(is_valid_cluster(data_cluster, bpb)){
+	while(!is_end_of_file(data_cluster)){
 		size_FAT += cluster_size;
 		data_cluster = get_fat_entry(data_cluster, image_buf, bpb);
 	}//end while	
