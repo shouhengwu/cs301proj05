@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "bootsect.h"
 #include "bpb.h"
@@ -127,29 +128,36 @@ void trim_size_dirent(struct direntry *dirent, int size_FAT){//trim down the siz
 
 }//end trim_dirent_size
 
-void trim_size_FAT(uint16_t startclust, uint8_t *image_buf, struct bpb33 *bpb, int size_dirent, int cluster_size){
-	//trim down the FAT chain that starts with startclust to the size indicated by size_dirent
-	int covered_size = 0;
-	uint16_t currentclust = startclust;
-	
-	while(covered_size < size_dirent){
-		covered_size += cluster_size;
-		currentclust = get_fat_entry(currentclust, image_buf, bpb);
-	}//end while
+void trim_size_FAT(uint16_t currentclust, uint8_t *image_buf, struct bpb33 *bpb, int size_dirent, int cluster_size){
+	//trim down the FAT chain that starts with currentclust to the size indicated by size_dirent
 
-	//mark currentclust as EOF, and free all clusters that are after the currentclust and up to the original EOF (inclusive).
+	int num_of_clusters = size_dirent / cluster_size;
+	if(size_dirent % cluster_size != 0){
+		num_of_clusters++;
+	}//end if
+
+	for(int count = 0; count < num_of_clusters - 1; count++){
+		currentclust = get_fat_entry(currentclust, image_buf, bpb);
+	}//end for
+
 	uint16_t tmp = currentclust;
-	currentclust = get_fat_entry(currentclust, image_buf, bpb);	
+	currentclust = get_fat_entry(currentclust, image_buf, bpb);
+	
 	set_fat_entry(tmp, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
-	while(is_valid_cluster(currentclust, bpb)){
-		printf("Freeing clusters!\n"); //TEST
-		tmp = currentclust;
-		currentclust = get_fat_entry(currentclust, image_buf, bpb);	
-		set_fat_entry(tmp, CLUST_FREE, image_buf, bpb);		
-	}//end while
-	set_fat_entry(currentclust, CLUST_FREE, image_buf, bpb);//Free the original EOF
 
 }//end trim_FAT_size
+
+bool is_bad_clust(uint16_t clust){
+	return (clust == (FAT12_MASK & CLUST_BAD) );
+}//end is_bad_cluster
+
+bool is_free_clust(uint16_t clust){
+	return (clust == (FAT12_MASK & CLUST_FREE) );
+}//end is_free_cluster
+
+bool is_last_clust(uint16_t clust){
+	return (clust == (FAT12_MASK & CLUST_LAST) );
+}//end is_last_cluster
 
 int calculateFATsize(uint16_t data_cluster, int cluster_size, uint8_t *image_buf, struct bpb33 *bpb){
 
@@ -158,8 +166,8 @@ int calculateFATsize(uint16_t data_cluster, int cluster_size, uint8_t *image_buf
 	while(!is_end_of_file(data_cluster)){
 		size_FAT += cluster_size;
 		data_cluster = get_fat_entry(data_cluster, image_buf, bpb);
-	}//end while	
-
+	}//end while
+	
 	return size_FAT;
 
 }//end calculateFATsize
@@ -168,7 +176,7 @@ void resolve_inconsistencies(uint16_t clust, uint8_t *image_buf, struct bpb33 *b
 		
 	//look at the files in the directory entries in start clust, and get their sizes (in bytes) as indicated by the metadata (from the directory entry) and the FAT table, respectively.
 
-	if(clust != 0 && !is_valid_cluster(clust, bpb)){
+	if(is_bad_clust(clust) || is_end_of_file(clust) || is_last_clust(clust) ){
 		printf("This is an invalid cluster.\n");//TEST
 		return;
 	}//end if 
@@ -185,38 +193,33 @@ void resolve_inconsistencies(uint16_t clust, uint8_t *image_buf, struct bpb33 *b
 		int type = -1;
 
 		uint16_t startclust = read_dirent(dirent, &type, entry_name);
-		printf("The type is: %d\n", type); //TEST
+		//printf("The type is: %d\n", type); //TEST
 		if(type == 1){//if this entry contains information about a directory
-			//follow_dir(startclust, image_buf, bpb);
-
-			printf("This is a directory. The name is: %s. Going into directories.\n     ", entry_name);//TEST
+			//printf("This is a directory. The name is: %s. Going into directories.\n     ", entry_name);//TEST
 			resolve_inconsistencies(startclust, image_buf, bpb);
 
 		}//end if
 		else if(type == 0){//if this entry contains information about a regular file, get its sizes as indicated by the FAT table and the directory entry, respectively
 
-			int size_dirent;
-			int size_FAT;
+			int size_dirent = -1;
+			int size_FAT = -1;
 
 			size_dirent = getulong(dirent->deFileSize);
 
 			uint16_t data_cluster = getushort(dirent->deStartCluster);			
 			size_FAT = calculateFATsize(data_cluster, cluster_size, image_buf, bpb);	
 
-			printf("This is a regular file. The name is: %s. The metadata size is: %d. The FAT size is: %d. ", entry_name, size_dirent, size_FAT);//TEST
 			if(size_FAT - size_dirent > cluster_size){
-				printf("FAT size too large!");
-				trim_size_FAT(startclust, image_buf, bpb, size_dirent, cluster_size);
-				printf("After truncation: The metadata size is: %d. The FAT size is: %d. \n", size_dirent, calculateFATsize(data_cluster, cluster_size, image_buf, bpb));
+				
+				printf("FAT size too large! File name: %s. Metadata size: %d. FAT size: %d\n", entry_name, size_dirent, size_FAT);//TEST
+				trim_size_FAT(data_cluster, image_buf, bpb, size_dirent, cluster_size);
+				printf("After truncation: the metadata size is: %d. The FAT size is: %d. \n", size_dirent, calculateFATsize(data_cluster, cluster_size, image_buf, bpb));
 			}//end if
 			else if(size_dirent > size_FAT){
-				printf("Metadata size too large!\n");
+				printf("Metadata size too large! File name: %s. Metadata size: %d. FAT size: %d\n", entry_name, size_dirent, size_FAT);//TEST
 				trim_size_dirent(dirent, size_FAT);
-				//printf("After truncation: The metadata size is: %d. The FAT size is: %d. \n", getulong(dirent->deFileSize), size_FAT);//TEST
+				printf("After truncation: The metadata size is: %d. The FAT size is: %d. \n", getulong(dirent->deFileSize), size_FAT);//TEST
 			}//end if
-			else{
-				printf("\n");
-			}//TEST
 			
 		}//end else if
 
@@ -241,8 +244,18 @@ int main(int argc, char** argv) {
     // your code should start here...
 	uint16_t root_dir_start_clust = 0;
 	resolve_inconsistencies(root_dir_start_clust, image_buf, bpb);
-
-
+	
+	/*
+	uint16_t experiment_clust = 3;
+	set_fat_entry(experiment_clust, FAT12_MASK & CLUST_BAD, image_buf, bpb);
+ 	if(get_fat_entry(experiment_clust, image_buf, bpb) == (FAT12_MASK & CLUST_BAD)){
+		printf("Bad cluster detected.\n");
+	}
+	else{
+		printf("Bad cluster not detected.\n");
+	}
+	*/
+	
 
     unmmap_file(image_buf, &fd);
     return 0;

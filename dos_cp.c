@@ -207,12 +207,12 @@ void copy_out_file(FILE *fd, uint16_t cluster, uint32_t bytes_remaining,
 
     if (cluster == 0) 
     {
-	fprintf(stderr, "Bad file termination\n");
-	return;
+		fprintf(stderr, "Bad file termination\n");
+		return;
     }
     else if (is_end_of_file(cluster)) 
     {
-	return;	
+		return;	
     } 
 
 
