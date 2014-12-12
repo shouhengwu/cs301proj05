@@ -125,8 +125,8 @@ uint16_t read_dirent(struct direntry *dirent, int *type, char *filename){
     return followclust;
 }//end read_dirent
 
-void mark_reference_map(uint16_t clust, int value, int reference_map[], int map_size){
-	if(clust < 0 || clust >= (uint16_t)map_size){
+void mark_reference_map(uint16_t clust, int reference_map[], int value){
+	if(clust < 0 || clust >= 2849){
 		return;
 	}//end if 
 
@@ -146,7 +146,7 @@ void trim_size_dirent(struct direntry *dirent, int size_FAT){//trim down the siz
 void trim_size_FAT(uint16_t currentclust, uint8_t *image_buf, struct bpb33 *bpb, int size_dirent, int cluster_size, int reference_map[]){
 	//trim down the FAT chain that starts with currentclust to the size indicated by size_dirent
 
-	reference_map[currentclust] = 1;
+	mark_reference_map(currentclust, reference_map, 1);
 
 	int num_of_clusters = size_dirent / cluster_size;
 	if(size_dirent % cluster_size != 0){
@@ -155,27 +155,27 @@ void trim_size_FAT(uint16_t currentclust, uint8_t *image_buf, struct bpb33 *bpb,
 
 	for(int count = 1; count < num_of_clusters; count++){
 		currentclust = get_fat_entry(currentclust, image_buf, bpb);
-		reference_map[currentclust] = 1;
+		mark_reference_map(currentclust, reference_map, 1);
 	}//end for
 
 
 	uint16_t tmp = currentclust;
 	currentclust = get_fat_entry(currentclust, image_buf, bpb);
-	reference_map[currentclust] = 1;
+	mark_reference_map(currentclust, reference_map, 1);
 
 	set_fat_entry(tmp, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
-	reference_map[tmp] = 1;
+	mark_reference_map(tmp, reference_map, 1);
 
 	while(!is_end_of_file(currentclust)){ //mark everything that is after the new EOF and before the original EOF as free		
 		tmp = currentclust;
 		currentclust = get_fat_entry(currentclust, image_buf, bpb);
-		reference_map[currentclust] = 1;
+		mark_reference_map(currentclust, reference_map, 1);
 
 		set_fat_entry(tmp, FAT12_MASK & CLUST_FREE, image_buf, bpb);
-		reference_map[tmp] = 0;
+		mark_reference_map(tmp, reference_map, 0);
 	}//end while 
 	set_fat_entry(currentclust, FAT12_MASK & CLUST_FREE, image_buf, bpb);//mark the original EOF as free
-	reference_map[currentclust] = 0;
+	mark_reference_map(currentclust, reference_map, 0);
 
 }//end trim_FAT_size
 
@@ -183,12 +183,12 @@ int calculateFATsize(uint16_t data_cluster, int cluster_size, uint8_t *image_buf
 
 	int size_FAT = 0;
 
-	reference_map[data_cluster] = 1;
+	mark_reference_map(data_cluster, reference_map, 1);
 
 	while(!is_end_of_file(data_cluster)){
 		size_FAT += cluster_size;
 		data_cluster = get_fat_entry(data_cluster, image_buf, bpb);
-		reference_map[data_cluster] = 1;
+		mark_reference_map(data_cluster, reference_map, 1);
 	}//end while
 	
 	return size_FAT;
@@ -209,7 +209,7 @@ void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf
 	//This function resolves the size differences between what the metadata indicates and what the FAT clusters indicate.
 	//It also populates reference_map which shows which clusters are referenced and which are not. 
 
-	reference_map[clust] = 1;
+	mark_reference_map(clust, reference_map, 1);
 
 	if(is_end_of_file(clust) ){
 		return;
@@ -241,7 +241,7 @@ void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf
 			size_dirent = getulong(dirent->deFileSize);
 
 			uint16_t data_cluster = getushort(dirent->deStartCluster);	
-			reference_map[data_cluster] = 1;
+			mark_reference_map(data_cluster, reference_map, 1);
 			size_FAT = calculateFATsize(data_cluster, cluster_size, image_buf, bpb, reference_map);	
 
 			if(size_FAT - size_dirent > cluster_size){
@@ -384,10 +384,10 @@ void print_orphans(uint16_t orphan_list[]){
 
 		int count_orphans = 0;
 		while(orphan_list[count_orphans] != (uint16_t) 0){
-			printf("%d ", orphan_list[count_orphans]); 
+			printf(" %d", orphan_list[count_orphans]); 
 			count_orphans++;
 		}//end while
-		printf("\n");
+		printf(". All orphans housed.\n");
 	}//end if
 
 }//end print_orphans
