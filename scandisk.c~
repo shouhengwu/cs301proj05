@@ -21,7 +21,9 @@ void usage(char *progname) {
     exit(1);
 }//end usage()
 
-//-------------------------------------------------------------- functions used to fix images 1 and 2.
+
+
+//-------------------------------------------------------------- Below are functions used to fix images 1 and 2.
 
 uint16_t read_dirent(struct direntry *dirent, int *type, char *filename){
 	//reads a directory entry, modifies type to indicate whether this entry refers to a directory (1), a regular file (0), or neither (-1), modifies filename to reflect the name of the directory or the file. Returns the start cluster if the entry refers to a directory, returns 0 if the entry refers to a regular file or refers to neither directory nor file. 
@@ -125,6 +127,15 @@ uint16_t read_dirent(struct direntry *dirent, int *type, char *filename){
     return followclust;
 }//end read_dirent
 
+
+bool is_bad_clust(uint16_t clust, uint8_t *image_buf, struct bpb33* bpb){
+	return (get_fat_entry(clust, image_buf, bpb) == (FAT12_MASK & CLUST_BAD) );
+}//end is_bad_cluster
+
+bool is_free_clust(uint16_t clust, uint8_t *image_buf, struct bpb33* bpb){
+	return (get_fat_entry(clust, image_buf, bpb) == (FAT12_MASK & CLUST_FREE) );
+}//end is_free_cluster
+
 void mark_reference_map(uint16_t clust, int reference_map[], int value){
 	if(clust < 0 || clust >= 2849){
 		return;
@@ -179,32 +190,36 @@ void trim_size_FAT(uint16_t currentclust, uint8_t *image_buf, struct bpb33 *bpb,
 
 }//end trim_FAT_size
 
-int calculateFATsize(uint16_t data_cluster, int cluster_size, uint8_t *image_buf, struct bpb33 *bpb, int reference_map[]){
+int followFATChain(uint16_t data_cluster, int cluster_size, uint8_t *image_buf, struct bpb33 *bpb, int reference_map[]){
 
 	int size_FAT = 0;
 
 	mark_reference_map(data_cluster, reference_map, 1);
 
-	while(!is_end_of_file(data_cluster)){
+	while(!is_end_of_file(data_cluster) && !is_bad_clust(data_cluster, image_buf, bpb)){
 		size_FAT += cluster_size;
+		uint16_t original_cluster = data_cluster;
 		data_cluster = get_fat_entry(data_cluster, image_buf, bpb);
 		mark_reference_map(data_cluster, reference_map, 1);
+
+		if(original_cluster == data_cluster){
+			set_fat_entry(data_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+			printf("Found a FAT entry (cluster #%d) that points to itself. The entry has been set to EOF.\n\n", );
+			break;
+		}//end if
+		
 	}//end while
+
+	if(is_bad_clust(data_cluster, image_buf, bpb)){//if a bad cluster is found, change it into an EOF. 
+		printf("Bad cluster detected: #%d.\n\n", data_cluster);
+		set_fat_entry(data_cluster, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+	}//end if
 	
 	return size_FAT;
 
-}//end calculateFATsize
+}//end followFATChain
 
-bool is_bad_clust(uint16_t clust, uint8_t *image_buf, struct bpb33* bpb){
-	return (get_fat_entry(clust, image_buf, bpb) == (FAT12_MASK & CLUST_BAD) );
-}//end is_bad_cluster
-
-bool is_free_clust(uint16_t clust, uint8_t *image_buf, struct bpb33* bpb){
-	return (get_fat_entry(clust, image_buf, bpb) == (FAT12_MASK & CLUST_FREE) );
-}//end is_free_cluster
-
-
-void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf, struct bpb33 *bpb, int reference_map[]){
+void traverse_world_and_populate_map(uint16_t clust, uint8_t *image_buf, struct bpb33 *bpb, int reference_map[]){
 		
 	//This function resolves the size differences between what the metadata indicates and what the FAT clusters indicate.
 	//It also populates reference_map which shows which clusters are referenced and which are not. 
@@ -228,10 +243,8 @@ void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf
 		memset(entry_name, '\0', 14);
 		int type = -1;
 		uint16_t startclust = read_dirent(dirent, &type, entry_name);
-		if(type == 1){//if this entry contains information about a directory
-			//printf("This is a directory. The name is: %s. Going into directories.\n     ", entry_name);//TEST		
-			resolve_inconsistencies_and_populate_map(startclust, image_buf, bpb, reference_map);
-
+		if(type == 1){//if this entry contains information about a directory	
+			traverse_world_and_populate_map(startclust, image_buf, bpb, reference_map);
 		}//end if
 		else if(type == 0){//if this entry contains information about a regular file, get its sizes as indicated by the FAT table and the directory entry, respectively
 
@@ -242,18 +255,20 @@ void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf
 
 			uint16_t data_cluster = getushort(dirent->deStartCluster);	
 			mark_reference_map(data_cluster, reference_map, 1);
-			size_FAT = calculateFATsize(data_cluster, cluster_size, image_buf, bpb, reference_map);	
+			size_FAT = followFATChain(data_cluster, cluster_size, image_buf, bpb, reference_map);	
+
+			//printf("Filename: %s. Direntry size: %d. FAT SIZE: %d.\n", entry_name, size_dirent, size_FAT);//TEST
 
 			if(size_FAT - size_dirent > cluster_size){
 				
-				printf("FAT size is too large for: %s. Metadata size: %d. FAT size: %d. ", entry_name, size_dirent, size_FAT);//TEST
+				printf("FAT size is too large for: %s. Direntry size: %d; FAT size: %d. ", entry_name, size_dirent, size_FAT);
 				trim_size_FAT(data_cluster, image_buf, bpb, size_dirent, cluster_size, reference_map);
-				printf("After reconciling sizes: the metadata size is: %d. The FAT size is: %d. \n\n", size_dirent, calculateFATsize(data_cluster, cluster_size, image_buf, bpb, reference_map));
+				printf("After reconciling sizes: direntry size is: %d; FAT size is: %d. \n\n", size_dirent, followFATChain(data_cluster, cluster_size, image_buf, bpb, reference_map));
 			}//end if
 			else if(size_dirent > size_FAT){
-				printf("Metadata size is too large: %s. Metadata size: %d. FAT size: %d. ", entry_name, size_dirent, size_FAT);//TEST
+				printf("Direntry size is too large: %s. Direntry size: %d; FAT size: %d. ", entry_name, size_dirent, size_FAT);
 				trim_size_dirent(dirent, size_FAT);
-				printf("After reconciling sizes: The metadata size is: %d. The FAT size is: %d. \n\n", getulong(dirent->deFileSize), size_FAT);//TEST
+				printf("After reconciling sizes: direntry size is: %d; The FAT size is: %d. \n\n", getulong(dirent->deFileSize), size_FAT);
 			}//end if
 			
 		}//end else if
@@ -262,7 +277,7 @@ void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf
 
 	}//end for
 
-}//end resolve_inconsistencies
+}//end traverse_world_and_populate_map
 
 //------------------------------------------------------------------------------- functions used to fix image 3.
 
@@ -349,7 +364,35 @@ struct direntry *find_available_direntry(uint8_t *image_buf, struct bpb33* bpb){
 	return NULL;
 }//end find_available_direntry
 
-void house_an_orphan(uint16_t orphan, uint8_t *image_buf, struct bpb33* bpb, int count){
+void delete_orphans(uint16_t orphan, uint16_t orphan_list[], uint8_t *image_buf, struct bpb33* bpb){
+
+	uint16_t currentclust = orphan;
+	while(1){
+
+		for(int i = 0; i < 2849; i++){
+			if(orphan_list[i] == currentclust){
+				orphan_list[i] = (uint16_t) 0;
+				break;
+			}//end if
+		}//end for
+		
+		if( is_free_clust(currentclust, image_buf, bpb) || is_end_of_file(get_fat_entry(currentclust, image_buf, bpb) )  ){
+			return;
+		}//end if	
+
+		if(is_bad_clust(currentclust, image_buf, bpb)){//CONTINUE
+			set_fat_entry(currentclust, FAT12_MASK & CLUST_EOFS, image_buf,bpb);
+			return;
+		}//end if
+
+		currentclust = get_fat_entry(currentclust, image_buf, bpb);
+				
+	}//end while
+		
+
+}//end delete_orphans
+
+void house_an_orphan(uint16_t orphan, uint8_t *image_buf, struct bpb33* bpb, int count, uint16_t orphan_list[]){
 	struct direntry *dirent = find_available_direntry(image_buf, bpb); // return a pointer to a directory entry that is either empty or deleted
 	if(dirent == NULL){
 		printf("There is no available directory entry left. Cannot house this orphan cluster.\n");
@@ -358,22 +401,27 @@ void house_an_orphan(uint16_t orphan, uint8_t *image_buf, struct bpb33* bpb, int
 	
 	char name[64] = {'f', 'o', 'u', 'n', 'd', '\0'};
 	char number[] = {'\0', '\0', '\0', '\0', '\0'};
-	sprintf(number, "%d", count+1);
+	sprintf(number, "%d", count);
 	strcat(name, number);
 	strcat(name, ".dat");
 
 	int cluster_size = bpb->bpbBytesPerSec * bpb->bpbSecPerClust;
-
-	write_dirent(dirent, name, orphan, cluster_size);
+	int buffer[2849];
+	int file_size = followFATChain(orphan, cluster_size, image_buf, bpb, buffer);
+	
+	delete_orphans(orphan, orphan_list, image_buf, bpb);
+	write_dirent(dirent, name, orphan, file_size);
 
 }//end  house_orphans
 
 void house_orphans(uint16_t orphan_list[], uint8_t *image_buf, struct bpb33* bpb){
-	int count = 0;
-	while(orphan_list[count] != (uint16_t) 0){
-		house_an_orphan(orphan_list[count], image_buf, bpb, count);
-		orphan_list++;
-	}//end while
+	int orphan_count = 0;
+	for(int i = 0; i < 2849; i++){
+		if(orphan_list[i] != (uint16_t) 0){
+			orphan_count++;
+			house_an_orphan(orphan_list[i], image_buf, bpb, orphan_count, orphan_list);
+		}//end if
+	}//end for
 
 }//end house_orphans
 
@@ -415,7 +463,7 @@ int main(int argc, char** argv) {
 
     image_buf = mmap_file(argv[1], &fd);
     bpb = check_bootsector(image_buf);
-	printf("\n");
+	printf("---------------------\n");
 
     // your code should start here...
 	uint16_t root_dir_start_clust = 0;
@@ -423,23 +471,13 @@ int main(int argc, char** argv) {
 	int map_size = 2849; //2880 - 1 - 9 - 9 - 14  + 2 = 2849
 	int reference_map[map_size];//means referenced, 0 means not referenced
 	initialize_reference_map(reference_map, map_size);
-	resolve_inconsistencies_and_populate_map(root_dir_start_clust, image_buf, bpb, reference_map);
+	traverse_world_and_populate_map(root_dir_start_clust, image_buf, bpb, reference_map);
+
 	uint16_t orphan_list[map_size];	
 	initialize_orphan_list(orphan_list, map_size);
 	find_orphans(reference_map, orphan_list, map_size, image_buf, bpb);
 	print_orphans(orphan_list);
 	house_orphans(orphan_list, image_buf, bpb);
-
-	/*TEST
-	for(int i = 0; i < map_size; i++){
-		printf("%d  ", orphan_list[i]);
-		if( (i+1) % 8 == 0){
-			printf("\n");	
-		}
-	}
-	//TEST_END */
-
-	
 
     unmmap_file(image_buf, &fd);	
 	free(bpb);
