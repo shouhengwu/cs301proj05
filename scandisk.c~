@@ -136,14 +136,19 @@ void trim_size_FAT(uint16_t currentclust, uint8_t *image_buf, struct bpb33 *bpb,
 		num_of_clusters++;
 	}//end if
 
-	for(int count = 0; count < num_of_clusters - 1; count++){
+	for(int count = 1; count < num_of_clusters; count++){
 		currentclust = get_fat_entry(currentclust, image_buf, bpb);
 	}//end for
 
 	uint16_t tmp = currentclust;
 	currentclust = get_fat_entry(currentclust, image_buf, bpb);
-	
 	set_fat_entry(tmp, FAT12_MASK & CLUST_EOFS, image_buf, bpb);
+	while(!is_end_of_file(currentclust)){ //mark everything that is after the new EOF and before the original EOF as free
+		tmp = currentclust;
+		currentclust = get_fat_entry(currentclust, image_buf, bpb);
+		set_fat_entry(tmp, FAT12_MASK & CLUST_FREE, image_buf, bpb);
+	}//end while 
+	set_fat_entry(tmp, FAT12_MASK & CLUST_FREE, image_buf, bpb);//mark the original EOF as free
 
 }//end trim_FAT_size
 
@@ -177,7 +182,6 @@ void resolve_inconsistencies(uint16_t clust, uint8_t *image_buf, struct bpb33 *b
 	//look at the files in the directory entries in start clust, and get their sizes (in bytes) as indicated by the metadata (from the directory entry) and the FAT table, respectively.
 
 	if(is_bad_clust(clust) || is_end_of_file(clust) || is_last_clust(clust) ){
-		printf("This is an invalid cluster.\n");//TEST
 		return;
 	}//end if 
 
@@ -193,7 +197,6 @@ void resolve_inconsistencies(uint16_t clust, uint8_t *image_buf, struct bpb33 *b
 		int type = -1;
 
 		uint16_t startclust = read_dirent(dirent, &type, entry_name);
-		//printf("The type is: %d\n", type); //TEST
 		if(type == 1){//if this entry contains information about a directory
 			//printf("This is a directory. The name is: %s. Going into directories.\n     ", entry_name);//TEST
 			resolve_inconsistencies(startclust, image_buf, bpb);
@@ -229,6 +232,76 @@ void resolve_inconsistencies(uint16_t clust, uint8_t *image_buf, struct bpb33 *b
 
 }//end resolve_inconsistencies
 
+void mark_cluster_map(uint16_t clust, int cluster_map[]){
+	cluster_map[clust - (FAT12_MASK & CLUST_FIRST) ] = 1;
+}//end mark_cluster_map
+
+void populate_cluster_map(uint16_t clust, uint8_t *image_buf, struct bpb33 *bpb, int cluster_map[]){
+
+	mark_cluster_map(clust, cluster_map);
+	if(is_bad_clust(clust) || is_end_of_file(clust) || is_last_clust(clust) ){
+		return;
+	}//end if 
+
+	struct direntry *dirent = (struct direntry*)cluster_to_addr(clust, image_buf, bpb);
+	int cluster_size = bpb->bpbBytesPerSec * bpb->bpbSecPerClust;
+	int direntry_per_cluster = cluster_size / sizeof(struct direntry);
+
+    for (int i = 0; i < direntry_per_cluster; i++){
+
+		char entry_name[14];
+		memset(entry_name, '\0', 14);
+		int type = -1;
+
+		uint16_t startclust = read_dirent(dirent, &type, entry_name);
+
+		if(type == 1){//if this direntry is a directory
+			populate_cluster_map(startclust, image_buf, bpb, cluster_map);
+		}//end if
+		else if(type == 0){//if this direntry is a regular file
+			uint16_t data_cluster = getushort(dirent->deStartCluster);
+			while(!is_free_clust(data_cluster) && !is_bad_clust(data_cluster) ){
+				mark_cluster_map(data_cluster, cluster_map);
+				data_cluster = get_fat_entry(data_cluster, image_buf, bpb);
+				if(is_end_of_file(data_cluster)){
+					mark_cluster_map(data_cluster, cluster_map);
+					break;
+				}//end if
+			}//end while
+		}//end else if
+
+		dirent++;
+
+	}//end for
+
+}//end populate_cluster_map
+
+void build_orphanage(uint16_t root_dir_start_clust, uint8_t *image_buf, struct bpb33 *bpb){
+
+	//test
+	printf("Total number of clusters: %d\n", ( FAT12_MASK & CLUST_LAST) - (FAT12_MASK & CLUST_FIRST) + 1);
+
+	//find orphan
+	int cluster_map[( FAT12_MASK & CLUST_LAST) - (FAT12_MASK & CLUST_FIRST) + 1]; //1 means referenced, 0 means not referenced
+	for(int i = 0; i < strlen(cluster_map); i++){//initialize the cluster_map
+		cluster_map[i] = 0;
+	}//end for
+	
+	printf("strlen(cluster_map): %d\n", sizeof(cluster_map) / sizeof(int) );
+
+	//TEST, print cluster_map
+	for(int i = 0; i < strlen(cluster_map); i++){
+		printf("%d  ", cluster_map[i]);		
+	}//end for
+
+	populate_cluster_map(root_dir_start_clust, image_buf, bpb, cluster_map);
+	
+
+
+
+}//end build_orphanage
+
+
 int main(int argc, char** argv) {
     uint8_t *image_buf;
     int fd;
@@ -243,7 +316,8 @@ int main(int argc, char** argv) {
 
     // your code should start here...
 	uint16_t root_dir_start_clust = 0;
-	resolve_inconsistencies(root_dir_start_clust, image_buf, bpb);
+	resolve_inconsistencies(root_dir_start_clust, image_buf, bpb); //resolve size differences
+	build_orphanage(root_dir_start_clust, image_buf, bpb); //clean up orphaned clusters
 	
 	/*
 	uint16_t experiment_clust = 3;
