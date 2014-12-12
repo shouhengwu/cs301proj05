@@ -125,6 +125,19 @@ uint16_t read_dirent(struct direntry *dirent, int *type, char *filename){
     return followclust;
 }//end read_dirent
 
+void mark_reference_map(uint16_t clust, int value, int reference_map[], int map_size){
+	if(clust < 0 || clust >= (uint16_t)map_size){
+		return;
+	}//end if 
+
+	if(value != 0 && value != 1){
+		return;
+	}//end if
+
+	reference_map[clust] = value;
+
+}
+
 void trim_size_dirent(struct direntry *dirent, int size_FAT){//trim down the size indicated by the directory entry so that it agrees with the size as indicated by the FAT table
 	putulong(dirent->deFileSize, size_FAT);
 
@@ -233,14 +246,14 @@ void resolve_inconsistencies_and_populate_map(uint16_t clust, uint8_t *image_buf
 
 			if(size_FAT - size_dirent > cluster_size){
 				
-				printf("FAT size too large! File name: %s. Metadata size: %d. FAT size: %d\n", entry_name, size_dirent, size_FAT);//TEST
+				printf("FAT size is too large for: %s. Metadata size: %d. FAT size: %d. ", entry_name, size_dirent, size_FAT);//TEST
 				trim_size_FAT(data_cluster, image_buf, bpb, size_dirent, cluster_size, reference_map);
-				printf("After truncation: the metadata size is: %d. The FAT size is: %d. \n", size_dirent, calculateFATsize(data_cluster, cluster_size, image_buf, bpb, reference_map));
+				printf("After reconciling sizes: the metadata size is: %d. The FAT size is: %d. \n\n", size_dirent, calculateFATsize(data_cluster, cluster_size, image_buf, bpb, reference_map));
 			}//end if
 			else if(size_dirent > size_FAT){
-				printf("Metadata size too large! File name: %s. Metadata size: %d. FAT size: %d\n", entry_name, size_dirent, size_FAT);//TEST
+				printf("Metadata size is too large: %s. Metadata size: %d. FAT size: %d. ", entry_name, size_dirent, size_FAT);//TEST
 				trim_size_dirent(dirent, size_FAT);
-				printf("After truncation: The metadata size is: %d. The FAT size is: %d. \n", getulong(dirent->deFileSize), size_FAT);//TEST
+				printf("After reconciling sizes: The metadata size is: %d. The FAT size is: %d. \n\n", getulong(dirent->deFileSize), size_FAT);//TEST
 			}//end if
 			
 		}//end else if
@@ -320,11 +333,77 @@ void find_orphans(int reference_map[], uint16_t orphan_list[], int map_size, uin
 
 }//end find_orphans
 
-void house_orphans(uint16_t orphan_list[], uint8_t *image_buf, struct bpb33* bpb){
+struct direntry *find_available_direntry(uint8_t *image_buf, struct bpb33* bpb){
+
+	struct direntry *dirent = (struct direntry *)root_dir_addr(image_buf, bpb);
+	int i = 0;
+	while(i < bpb->bpbRootDirEnts){
+		if((uint8_t)dirent->deName[0] == SLOT_EMPTY || (uint8_t)dirent->deName[0] == SLOT_DELETED){
+			return dirent;
+		}//end if
+
+		i++;
+		dirent++;
+	}//end while
 	
+	return NULL;
+}//end find_available_direntry
+
+void house_an_orphan(uint16_t orphan, uint8_t *image_buf, struct bpb33* bpb, int count){
+	struct direntry *dirent = find_available_direntry(image_buf, bpb); // return a pointer to a directory entry that is either empty or deleted
+	if(dirent == NULL){
+		printf("There is no available directory entry left. Cannot house this orphan cluster.\n");
+		return;
+	}//end if
 	
+	char name[64] = {'f', 'o', 'u', 'n', 'd', '\0'};
+	char number[] = {'\0', '\0', '\0', '\0', '\0'};
+	sprintf(number, "%d", count+1);
+	strcat(name, number);
+	strcat(name, ".dat");
+
+	int cluster_size = bpb->bpbBytesPerSec * bpb->bpbSecPerClust;
+
+	write_dirent(dirent, name, orphan, cluster_size);
 
 }//end  house_orphans
+
+void house_orphans(uint16_t orphan_list[], uint8_t *image_buf, struct bpb33* bpb){
+	int count = 0;
+	while(orphan_list[count] != (uint16_t) 0){
+		house_an_orphan(orphan_list[count], image_buf, bpb, count);
+		orphan_list++;
+	}//end while
+
+}//end house_orphans
+
+void print_orphans(uint16_t orphan_list[]){
+
+	if(orphan_list[0] != (uint16_t) 0) {
+		printf("Orphans found. They are cluster(s): ");
+
+		int count_orphans = 0;
+		while(orphan_list[count_orphans] != (uint16_t) 0){
+			printf("%d ", orphan_list[count_orphans]); 
+			count_orphans++;
+		}//end while
+		printf("\n");
+	}//end if
+
+}//end print_orphans
+
+void initialize_reference_map(int reference_map[], int map_size){
+	for(int i = 0; i < map_size; i++){//initialize reference_map
+		reference_map[i] = 0;
+	}//end for
+}
+
+void initialize_orphan_list(uint16_t orphan_list[], int map_size){
+	for(int i = 0; i < map_size; i++){//initialize orphan_list
+		orphan_list[i] = (uint16_t) 0;
+	}//end for
+
+}
 
 int main(int argc, char** argv) {
     uint8_t *image_buf;
@@ -342,31 +421,23 @@ int main(int argc, char** argv) {
 	uint16_t root_dir_start_clust = 0;
 
 	int map_size = 2849; //2880 - 1 - 9 - 9 - 14  + 2 = 2849
-	int reference_map[map_size];
-						   //means referenced, 0 means not referenced
-	for(int i = 0; i < map_size; i++){//initialize reference_map
-		reference_map[i] = 0;
-	}//end for
-
-
-
+	int reference_map[map_size];//means referenced, 0 means not referenced
+	initialize_reference_map(reference_map, map_size);
 	resolve_inconsistencies_and_populate_map(root_dir_start_clust, image_buf, bpb, reference_map);
+	uint16_t orphan_list[map_size];	
+	initialize_orphan_list(orphan_list, map_size);
+	find_orphans(reference_map, orphan_list, map_size, image_buf, bpb);
+	print_orphans(orphan_list);
+	house_orphans(orphan_list, image_buf, bpb);
 
-	uint16_t orphan_list[map_size];
-	for(int i = 0; i < map_size; i++){//initialize orphan_list
-		orphan_list[i] = (uint16_t) 0;
-	}//end for
-
-	find_orphans(reference_map, orphan_list, map_size, image_buf, bpb); 
-
-	//TEST
+	/*TEST
 	for(int i = 0; i < map_size; i++){
 		printf("%d  ", orphan_list[i]);
 		if( (i+1) % 8 == 0){
 			printf("\n");	
 		}
 	}
-	//TEST_END 
+	//TEST_END */
 
 	
 
